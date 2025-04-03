@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:latest
+    restart: always
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: mydb
+      POSTGRES_WAL_BUFFERS: "64MB"
+      POSTGRES_SHARED_BUFFERS: "4GB"
+
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  p:
+    image: node:latest
+    container_name: json_processor
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - ./json:/app/json
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: secret
+      DB_NAME: mydb
+      PGOPTIONS: "-c work_mem=1GB -c maintenance_work_mem=4GB -c max_parallel_workers_per_gather=0"
+      NODE_OPTIONS: "--max-old-space-size=8192"
+    env_file:
+      - .env.processor
+    depends_on:
+      - db
+    networks:
+      - app-network
+    # command: sh -c "npm install && node analyze-structure.js"
+    command: sh -c "npm install && node bulk-import.js"
+    # command: sh -c "npm install && node process-json.js"
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge

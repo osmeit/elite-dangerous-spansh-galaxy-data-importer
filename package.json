@@ -1,0 +1,11 @@
+{
+    "name": "json-processor",
+    "version": "1.0.0",
+    "scripts": {
+        "start": "node process-json.js"
+    },
+    "dependencies": {
+        "pg": "^8.11.3",
+        "stream-json": "^1.9.1"
+    }
+}
