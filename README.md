@@ -26,8 +26,8 @@ The **Elite Galaxy Data Importer** is a tool designed to process and import star
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
-cd elite-galaxy-data-importer
+git clone git@github.com:osmeit/osmeit-elite-dangerous-galaxy-data-importer.git
+cd osmeit-elite-dangerous-galaxy-data-importer
 ```
 
 ### 2. Configure Environment Variables
