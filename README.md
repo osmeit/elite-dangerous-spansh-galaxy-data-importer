@@ -61,7 +61,7 @@ This will start the PostgreSQL database and the JSON processor in detached mode.
 To monitor the logs of the processor, use the following command:
 
 ```bash
-docker-compose logs -f processor
+docker-compose logs -f p
 ```
 
 ### 6. Access the Database
