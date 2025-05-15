@@ -7,9 +7,9 @@ const fs = require('fs');
 const { Transform } = require('stream');
 
 // Config
-const BATCH_SIZE = process.env.BATCH_SIZE || 5000;
+const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || 500);
 const FILE_PATH = process.env.FILE_PATH;
-const PARALLEL_BATCHES = process.env.PARALLEL_BATCHES || 1; // Anzahl paralleler Batches
+const PARALLEL_BATCHES = parseInt(process.env.PARALLEL_BATCHES || 10);
 
 if (!FILE_PATH) {
     console.error('Error: No file path to "galaxy.json.gz" provided in FILE_PATH environment variable');
@@ -29,10 +29,11 @@ const pool = new Pool({
     application_name: 'bulk_importer'
 });
 
+// Initialize the database
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
-        console.log('Erstelle neue Tabelle...');
+        console.log('Initializing database...');
         await client.query(`
             CREATE TABLE IF NOT EXISTS public.systems_jsonb (
                 id64 BIGINT NOT NULL,
@@ -41,23 +42,25 @@ async function initializeDatabase() {
                 CONSTRAINT systems_jsonb_pkey PRIMARY KEY (id64)
             );
         `);
-        console.log('Tabelle erfolgreich erstellt');
+        console.log('Database initialized successfully.');
     } finally {
         client.release();
     }
 }
 
+// Insert a batch of systems into the database
 async function insertBatch(batch) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
         const id64Array = [];
-        const coordsArray = [];
+        const xArray = [];
+        const yArray = [];
+        const zArray = [];
         const dataArray = [];
 
         batch.forEach(sys => {
-            // Validierung der Koordinaten
             if (
                 sys.coords &&
                 typeof sys.coords.x === 'number' &&
@@ -68,32 +71,34 @@ async function insertBatch(batch) {
                 !isNaN(sys.coords.z)
             ) {
                 id64Array.push(sys.id64);
-                // Erstelle eine korrekte WKT-Repräsentation für POINTZ
-                coordsArray.push(`POINTZ(${sys.coords.x} ${sys.coords.y} ${sys.coords.z})`);
-                // Füge den kompletten JSON des Systems in das dataArray ein
+                xArray.push(sys.coords.x);
+                yArray.push(sys.coords.y);
+                zArray.push(sys.coords.z);
                 dataArray.push(sys);
             } else {
-                console.warn(`Ungültige Koordinaten für System mit id64: ${sys.id64}`);
+                console.warn(`Skipping system with invalid coordinates: id64=${sys.id64}`);
             }
         });
 
-        if (id64Array.length === 0) {
-            console.warn('Keine gültigen Systeme in diesem Batch. Überspringe Batch.');
-            await client.query('ROLLBACK');
-            return;
-        }
-
-        await client.query(`
-            INSERT INTO public.systems_jsonb (id64, coords_geom, data)
-            SELECT * FROM UNNEST(
-                $1::bigint[],
-                $2::geometry(PointZ)[],
-                $3::jsonb[]
-            )
-            ON CONFLICT (id64) DO UPDATE SET
+        if (id64Array.length > 0) {
+            await client.query(`
+                INSERT INTO public.systems_jsonb (id64, coords_geom, data)
+                SELECT
+                    id64,
+                    ST_MakePoint(x, y, z)::geometry(PointZ),
+                    data
+                FROM UNNEST(
+                    $1::bigint[],
+                    $2::double precision[],
+                    $3::double precision[],
+                    $4::double precision[],
+                    $5::jsonb[]
+                ) AS t(id64, x, y, z, data)
+                ON CONFLICT (id64) DO UPDATE SET
                     coords_geom = EXCLUDED.coords_geom,
                     data = EXCLUDED.data;
-        `, [id64Array, coordsArray, dataArray]);
+            `, [id64Array, xArray, yArray, zArray, dataArray]);
+        }
 
         await client.query('COMMIT');
     } catch (err) {
@@ -105,10 +110,11 @@ async function insertBatch(batch) {
     }
 }
 
+// Process the JSON file in batches
 async function processGalaxy() {
     await initializeDatabase();
 
-    console.log('Starte Galaxy-Import...');
+    console.log('Starting galaxy import...');
     const start = Date.now();
     let processed = 0;
     let batchQueue = [];
@@ -128,16 +134,13 @@ async function processGalaxy() {
                         const batch = batchQueue;
                         batchQueue = [];
 
-                        // Starte parallele Verarbeitung
-                        processBatch(batch).then(() => {
+                        insertBatch(batch).then(() => {
                             processed += batch.length;
-                            if (processed % (BATCH_SIZE * PARALLEL_BATCHES) === 0) {
-                                const elapsed = (Date.now() - start) / 1000;
-                                console.log(
-                                    `Progress: ${processed} systems | ` +
-                                    `${(processed / elapsed).toFixed(2)} systems/sec`
-                                );
-                            }
+                            const elapsed = (Date.now() - start) / 1000;
+                            console.log(
+                                `Progress: ${processed} systems | ` +
+                                `${(processed / elapsed).toFixed(2)} systems/sec`
+                            );
                             callback();
                         }).catch(callback);
                     } else {
@@ -150,14 +153,19 @@ async function processGalaxy() {
                     console.error('Pipeline error:', err);
                     reject(err);
                 } else {
-                    // Verarbeite verbleibende Daten
                     if (batchQueue.length > 0) {
-                        processBatch(batchQueue).then(() => {
-                            console.log(`Import abgeschlossen! Systems: ${processed} Dauer: ${Math.round((Date.now() - start) / 1000)}s`);
+                        insertBatch(batchQueue).then(() => {
+                            const elapsed = (Date.now() - start) / 1000;
+                            console.log(
+                                `Import completed! Systems: ${processed} | Duration: ${Math.round(elapsed)}s`
+                            );
                             resolve();
                         }).catch(reject);
                     } else {
-                        console.log(`Import abgeschlossen! Systems: ${processed} Dauer: ${Math.round((Date.now() - start) / 1000)}s`);
+                        const elapsed = (Date.now() - start) / 1000;
+                        console.log(
+                            `Import completed! Systems: ${processed} | Duration: ${Math.round(elapsed)}s`
+                        );
                         resolve();
                     }
                 }
@@ -166,18 +174,5 @@ async function processGalaxy() {
     }).finally(() => pool.end());
 }
 
-async function processBatch(batch) {
-    const promises = [];
-    const chunkSize = Math.ceil(batch.length / PARALLEL_BATCHES);
-
-    for (let i = 0; i < PARALLEL_BATCHES; i++) {
-        const chunk = batch.slice(i * chunkSize, (i + 1) * chunkSize);
-        if (chunk.length > 0) {
-            promises.push(insertBatch(chunk));
-        }
-    }
-
-    await Promise.all(promises);
-}
-
+// Start the import process
 processGalaxy().catch(console.error);
